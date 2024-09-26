@@ -40,15 +40,31 @@ type coordinatorMessage struct {
 }
 
 type Coordinator struct {
-	mapTasks       []MRTask // map Tasks
-	mapTaskLeft    int
-	reduceTasks    []MRTask // reduce Tasks
-	reduceTaskleft int
+	mapTasks       []MRTask                // map Tasks
+	mapTaskLeft    int                     // 剩余非 Finished
+	reduceTasks    []MRTask                // reduce Tasks
+	reduceTaskleft int                     // 剩余非 Finished
 	messageChan    chan coordinatorMessage // 与 coordinatorHandler 通信
-	nReduce        int                     // Reduce task 数量 = 中间文件个数
+	nReduce        int                     // Reduce task 数量
+}
+
+func PrintTask(task *MRTask) {
+	log.Printf("%+v\n", task)
+}
+
+func (c *Coordinator) PrintTasks() {
+	for i := range c.mapTasks {
+		log.Printf("map task %d: %+v\n", i, c.mapTasks[i])
+	}
+	for i := range c.reduceTasks {
+		log.Printf("reduce task %d: %+v\n", i, c.reduceTasks[i])
+	}
 }
 
 func (c *Coordinator) doAllocTask() *MRTask {
+
+	c.PrintTasks()
+
 	if c.reduceTaskleft == 0 {
 		return &MRTask{
 			Kind: "end",
@@ -184,14 +200,15 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 
 	// 初始化 mapTasks
-	c.mapTasks = make([]MRTask, len(files))
-	for IDx, Filename := range files {
-		c.mapTasks[IDx] = MRTask{
+	c.mapTasks = make([]MRTask, 0, len(files))
+	for idx, Filename := range files {
+		newMapTask := MRTask{
 			Filename: Filename,
 			Kind:     "map",
-			ID:       IDx,
+			ID:       idx,
 			Status:   Ready,
 		}
+		c.mapTasks = append(c.mapTasks, newMapTask)
 	}
 	c.mapTaskLeft = len(files)
 
@@ -199,17 +216,19 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.nReduce = nReduce
 
 	// 初始化 reduceTasks
-	c.reduceTasks = make([]MRTask, c.nReduce)
+	c.reduceTasks = make([]MRTask, 0, c.nReduce)
 	for i := 0; i < c.nReduce; i++ {
-		c.reduceTasks[i] = MRTask{
+		newReduceTask := MRTask{
 			Kind:   "reduce",
 			ID:     i,
 			Status: Unready,
 		}
+		c.reduceTasks = append(c.reduceTasks, newReduceTask)
 	}
 	c.reduceTaskleft = nReduce
 
-	// 初始化 messageChannel 并启动 coordinatorHandler 协程
+	// 初始化 messageChannel
+	// 启动 coordinatorHandler 协程
 	c.messageChan = make(chan coordinatorMessage)
 	go c.coordinatorHandler()
 

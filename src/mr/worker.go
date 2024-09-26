@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"regexp"
+	"sync"
 )
 
 // Map functions return a slice of KeyValue.
@@ -49,10 +51,10 @@ func doMap(task *MRTask, mapf func(string, string) []KeyValue, nReduce int) erro
 	}
 	defer inputFile.Close()
 
-	outputFiles := make([]*os.File, nReduce)
+	outputFiles := make([]*os.File, 0, nReduce)
 	for i := 0; i < nReduce; i++ {
 		mapFileName := fmt.Sprintf("mr-out-%d-%d", task.ID, i)
-		file, err := os.OpenFile(mapFileName, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
+		file, err := os.OpenFile(mapFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			return errors.New("doMap->" + err.Error())
 		}
@@ -79,6 +81,97 @@ func doMap(task *MRTask, mapf func(string, string) []KeyValue, nReduce int) erro
 	return nil
 }
 
+/*
+ * reduce 阶段读单个文件
+ */
+func reduceReadFile(kvCache map[string][]string, fileName string) error {
+	file, err := os.OpenFile(fileName, os.O_RDONLY, 0644)
+	if err != nil {
+		return errors.New("reduceReadFile->" + err.Error())
+	}
+	defer file.Close()
+
+	var newKey, newVal string
+	for {
+		n, err := fmt.Fscanf(file, "%v %v", &newKey, &newVal)
+		if err != nil && err != io.EOF {
+			return errors.New("reduceReadFile->" + err.Error())
+		}
+		if n < 2 {
+			return nil
+		}
+
+		if _, exist := kvCache[newKey]; !exist {
+			kvCache[newKey] = make([]string, 0)
+		}
+		kvCache[newKey] = append(kvCache[newKey], newVal)
+	}
+}
+
+/**
+ * 多个 routine
+ * 将所有 reduceID 匹配的 mr-out-*-<reduceID> 进行聚合、排序到 map[string][]string 中
+ * 对每一个 key，启动一个 goroutine 来写入到 mr-out-<reduceID>
+ */
+func doReduce(task *MRTask, reducef func(string, []string) string) error {
+	// 初始化 kvCache
+	kvCache := make(map[string][]string, 1024)
+
+	// 读入格式匹配(mr-out-*-<reduceID>)的文件至 kvCache
+	pattern := fmt.Sprintf(`mr-out-\d+-%d`, task.ID)
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return errors.New("doReduce->" + err.Error())
+	}
+
+	files, err := os.ReadDir(".")
+	if err != nil {
+		return errors.New("doReduce->" + err.Error())
+	}
+
+	for _, file := range files {
+		if !file.IsDir() && re.MatchString(file.Name()) {
+			err := reduceReadFile(kvCache, file.Name())
+			if err != nil {
+				return errors.New("doReduce->" + err.Error())
+			}
+		}
+	}
+
+	// 使用 channel 和 handlerRoutine 来处理文件写入
+	// channel buffer 大小为 100
+	outputFileName := fmt.Sprintf("mr-out-%d", task.ID)
+	outputFile, err := os.OpenFile(outputFileName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return errors.New("doReduce->" + err.Error())
+	}
+	defer outputFile.Close()
+
+	writeChan := make(chan string, 100)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func(outputFile *os.File) {
+		defer wg.Done()
+		for writeMsg := range writeChan {
+			if _, err := outputFile.WriteString(writeMsg + "\n"); err != nil {
+				log.Printf("error writing to %s", outputFile.Name())
+			}
+		}
+	}(outputFile)
+
+	for key, val := range kvCache {
+		outputString := key + " " + reducef(key, val)
+		writeChan <- outputString
+	}
+	close(writeChan) // channel 写入结束，直接关闭
+
+	// 等待延迟到 handlerRoutine 处理完所有写入请求再关闭文件指针
+	wg.Wait()
+
+	return nil
+}
+
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 	// 第一次 RPC call 初始化 nReduce
@@ -97,11 +190,14 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 		switch newTask.Kind {
 		case "wait":
+			log.Printf("Wait")
 			continue
 		case "end":
 			log.Printf("Worker end")
 			return
 		case "map":
+			// log
+			PrintTask(newTask)
 			// handle
 			err := doMap(newTask, mapf, nReduce)
 			if err != nil {
@@ -115,8 +211,21 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 				return
 			}
 		case "reduce":
-			// doReduce()
+			// log
+			PrintTask(newTask)
+			// handle
+			err := doReduce(newTask, reducef)
+			log.Printf("Submitted task1")
+			if err != nil {
+				log.Print(err.Error())
+				return
+			}
 			// submit
+			err = CallSubmitTask(newTask.Kind, newTask.ID)
+			if err != nil {
+				log.Print(err.Error())
+				return
+			}
 		}
 	}
 }

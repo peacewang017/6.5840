@@ -113,14 +113,18 @@ func (c *Coordinator) setReduceTasksReady() {
 func (c *Coordinator) doSubmitTask(TaskKind string, ID int) {
 	switch TaskKind {
 	case "map":
-		c.mapTasks[ID].Status = Finished
-		c.mapTaskLeft--
+		if c.mapTasks[ID].Status == Running {
+			c.mapTasks[ID].Status = Finished
+			c.mapTaskLeft--
+		}
 		if c.mapTaskLeft == 0 {
 			c.setReduceTasksReady()
 		}
 	case "reduce":
-		c.reduceTasks[ID].Status = Finished
-		c.reduceTaskleft--
+		if c.reduceTasks[ID].Status == Running {
+			c.reduceTasks[ID].Status = Finished
+			c.reduceTaskleft--
+		}
 	}
 }
 
@@ -137,7 +141,7 @@ func (c *Coordinator) coordinatorHandler() {
 }
 
 // Your code here -- RPC handlers for the worker to call.
-func (c *Coordinator) GetNReduce(args **GetNReduceArgs, reply *GetNReduceReply) error {
+func (c *Coordinator) GetNReduce(args *GetNReduceArgs, reply *GetNReduceReply) error {
 	reply.NReduce = c.nReduce
 	return nil
 }
@@ -203,10 +207,10 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.mapTasks = make([]MRTask, 0, len(files))
 	for idx, Filename := range files {
 		newMapTask := MRTask{
-			Filename: Filename,
 			Kind:     "map",
 			ID:       idx,
 			Status:   Ready,
+			Filename: Filename,
 		}
 		c.mapTasks = append(c.mapTasks, newMapTask)
 	}

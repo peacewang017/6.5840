@@ -42,7 +42,7 @@ func mapWrite(newKVs []KeyValue, nReduce int, files []*os.File) error {
 
 /**
  * 单个 routine
- * 每次覆盖式地将结果写入到 mrout-<task.id>-<reduceID> 中
+ * 每次覆盖式地将结果写入到 mr-<task.id>-<reduceID> 中
  */
 func doMap(task *MRTask, mapf func(string, string) []KeyValue, nReduce int) error {
 	inputFile, err := os.Open(task.Filename)
@@ -53,8 +53,8 @@ func doMap(task *MRTask, mapf func(string, string) []KeyValue, nReduce int) erro
 
 	outputFiles := make([]*os.File, 0, nReduce)
 	for i := 0; i < nReduce; i++ {
-		mapFileName := fmt.Sprintf("mr-out-%d-%d", task.ID, i)
-		file, err := os.OpenFile(mapFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		mapFileName := fmt.Sprintf("mr-%d-%d", task.ID, i)
+		file, err := os.OpenFile(mapFileName, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			return errors.New("doMap->" + err.Error())
 		}
@@ -62,22 +62,17 @@ func doMap(task *MRTask, mapf func(string, string) []KeyValue, nReduce int) erro
 		outputFiles = append(outputFiles, file)
 	}
 
-	buf := make([]byte, 1024)
-	for {
-		n, err := inputFile.Read(buf)
-		if err != nil && err != io.EOF {
-			return errors.New("doMap->" + err.Error())
-		}
-		if n == 0 {
-			break
-		}
-
-		newKVs := mapf(task.Filename, string(buf[0:n]))
-		err = mapWrite(newKVs, nReduce, outputFiles)
-		if err != nil {
-			return errors.New("doMap->" + err.Error())
-		}
+	content, err := io.ReadAll(inputFile)
+	if err != nil {
+		return errors.New("doMap->" + err.Error())
 	}
+
+	newKVs := mapf(task.Filename, string(content))
+	err = mapWrite(newKVs, nReduce, outputFiles)
+	if err != nil {
+		return errors.New("doMap->" + err.Error())
+	}
+
 	return nil
 }
 
@@ -110,7 +105,7 @@ func reduceReadFile(kvCache map[string][]string, fileName string) error {
 
 /**
  * 多个 routine
- * 将所有 reduceID 匹配的 mr-out-*-<reduceID> 进行聚合、排序到 map[string][]string 中
+ * 将所有 reduceID 匹配的 mr-*-<reduceID> 进行聚合、排序到 map[string][]string 中
  * 对每一个 key，启动一个 goroutine 来写入到 mr-out-<reduceID>
  */
 func doReduce(task *MRTask, reducef func(string, []string) string) error {
@@ -118,7 +113,7 @@ func doReduce(task *MRTask, reducef func(string, []string) string) error {
 	kvCache := make(map[string][]string, 1024)
 
 	// 读入格式匹配(mr-out-*-<reduceID>)的文件至 kvCache
-	pattern := fmt.Sprintf(`mr-out-\d+-%d`, task.ID)
+	pattern := fmt.Sprintf(`mr-\d+-%d`, task.ID)
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return errors.New("doReduce->" + err.Error())
@@ -198,34 +193,40 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 		case "map":
 			// log
 			PrintTask(newTask)
+
 			// handle
 			err := doMap(newTask, mapf, nReduce)
 			if err != nil {
 				log.Print(err.Error())
 				return
 			}
+
 			// submit
 			err = CallSubmitTask(newTask.Kind, newTask.ID)
 			if err != nil {
 				log.Print(err.Error())
 				return
 			}
+			log.Printf("Submitted map task %d", newTask.ID)
 		case "reduce":
 			// log
 			PrintTask(newTask)
+
 			// handle
 			err := doReduce(newTask, reducef)
-			log.Printf("Submitted task1")
+
 			if err != nil {
 				log.Print(err.Error())
 				return
 			}
+
 			// submit
 			err = CallSubmitTask(newTask.Kind, newTask.ID)
 			if err != nil {
 				log.Print(err.Error())
 				return
 			}
+			log.Printf("Submitted reduce task %d", newTask.ID)
 		}
 	}
 }

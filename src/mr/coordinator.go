@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"time"
 )
 
 type MRTaskStatus int
@@ -26,6 +27,10 @@ type MRTask struct {
 
 	// map:
 	Filename string // 输入文件
+
+	// in mapTasks or reduceTasks
+	// 在 Status == running 时有效
+	StartTime time.Time
 }
 
 type coordinatorMessage struct {

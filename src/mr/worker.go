@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -9,6 +8,7 @@ import (
 	"net/rpc"
 	"os"
 	"regexp"
+	"sort"
 	"sync"
 )
 
@@ -34,7 +34,17 @@ func mapWrite(newKVs []KeyValue, nReduce int, files []*os.File) error {
 		line := fmt.Sprintf("%v %v\n", newKV.Key, newKV.Value)
 		reduceID := ihash(newKV.Key) % nReduce
 		if _, err := files[reduceID].WriteString(line); err != nil {
-			return errors.New("mapWrite->" + err.Error())
+			return fmt.Errorf("mapWrite: %w", err)
+		}
+	}
+	return nil
+}
+
+func reduceWrite(newKVs []KeyValue, file *os.File) error {
+	for _, newKV := range newKVs {
+		line := fmt.Sprintf("%v %v\n", newKV.Key, newKV.Value)
+		if _, err := file.WriteString(line); err != nil {
+			return fmt.Errorf("reduceWrite: %w", err)
 		}
 	}
 	return nil
@@ -47,7 +57,7 @@ func mapWrite(newKVs []KeyValue, nReduce int, files []*os.File) error {
 func doMap(task *MRTask, mapf func(string, string) []KeyValue, nReduce int) error {
 	inputFile, err := os.Open(task.Filename)
 	if err != nil {
-		return errors.New("doMap->" + err.Error())
+		return fmt.Errorf("doMap: %w", err)
 	}
 	defer inputFile.Close()
 
@@ -56,7 +66,7 @@ func doMap(task *MRTask, mapf func(string, string) []KeyValue, nReduce int) erro
 		mapFileName := fmt.Sprintf("mr-%d-%d", task.ID, i)
 		file, err := os.OpenFile(mapFileName, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
-			return errors.New("doMap->" + err.Error())
+			return fmt.Errorf("doMap: %w", err)
 		}
 		defer file.Close()
 		outputFiles = append(outputFiles, file)
@@ -64,13 +74,13 @@ func doMap(task *MRTask, mapf func(string, string) []KeyValue, nReduce int) erro
 
 	content, err := io.ReadAll(inputFile)
 	if err != nil {
-		return errors.New("doMap->" + err.Error())
+		return fmt.Errorf("doMap: %w", err)
 	}
 
 	newKVs := mapf(task.Filename, string(content))
 	err = mapWrite(newKVs, nReduce, outputFiles)
 	if err != nil {
-		return errors.New("doMap->" + err.Error())
+		return fmt.Errorf("doMap: %w", err)
 	}
 
 	return nil
@@ -82,7 +92,7 @@ func doMap(task *MRTask, mapf func(string, string) []KeyValue, nReduce int) erro
 func reduceReadFile(kvCache map[string][]string, fileName string) error {
 	file, err := os.OpenFile(fileName, os.O_RDONLY, 0644)
 	if err != nil {
-		return errors.New("reduceReadFile->" + err.Error())
+		return fmt.Errorf("reduceReadFile: %w", err)
 	}
 	defer file.Close()
 
@@ -90,7 +100,7 @@ func reduceReadFile(kvCache map[string][]string, fileName string) error {
 	for {
 		n, err := fmt.Fscanf(file, "%v %v", &newKey, &newVal)
 		if err != nil && err != io.EOF {
-			return errors.New("reduceReadFile->" + err.Error())
+			return fmt.Errorf("reduceReadFile: %w", err)
 		}
 		if n < 2 {
 			return nil
@@ -106,63 +116,80 @@ func reduceReadFile(kvCache map[string][]string, fileName string) error {
 /**
  * 多个 routine
  * 将所有 reduceID 匹配的 mr-*-<reduceID> 进行聚合、排序到 map[string][]string 中
- * 对每一个 key，启动一个 goroutine 来写入到 mr-out-<reduceID>
+ * 对每一个 key，启动一个 goroutine 来写入到 kvOutput，写入完成后进行排序
+ * 最终将 kvOutput 写入到 mr-out-<reduceID> 中
  */
 func doReduce(task *MRTask, reducef func(string, []string) string) error {
 	// 初始化 kvCache
 	kvCache := make(map[string][]string, 1024)
 
-	// 读入格式匹配(mr-out-*-<reduceID>)的文件至 kvCache
+	// 读入 mr-out-*-<reduceID> 的文件至 kvCache
 	pattern := fmt.Sprintf(`mr-\d+-%d`, task.ID)
 	re, err := regexp.Compile(pattern)
 	if err != nil {
-		return errors.New("doReduce->" + err.Error())
+		return fmt.Errorf("doReduce: %w", err)
 	}
 
 	files, err := os.ReadDir(".")
 	if err != nil {
-		return errors.New("doReduce->" + err.Error())
+		return fmt.Errorf("doReduce: %w", err)
 	}
 
 	for _, file := range files {
 		if !file.IsDir() && re.MatchString(file.Name()) {
 			err := reduceReadFile(kvCache, file.Name())
 			if err != nil {
-				return errors.New("doReduce->" + err.Error())
+				return fmt.Errorf("doReduce: %w", err)
 			}
 		}
 	}
 
-	// 使用 channel 和 handlerRoutine 来处理文件写入
-	// channel buffer 大小为 100
+	// 打开 mr-out-<reduceID> 文件
 	outputFileName := fmt.Sprintf("mr-out-%d", task.ID)
 	outputFile, err := os.OpenFile(outputFileName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
-		return errors.New("doReduce->" + err.Error())
+		return fmt.Errorf("doReduce: %w", err)
 	}
 	defer outputFile.Close()
 
-	writeChan := make(chan string, 100)
+	// reducef 的结果写入首先无序地写入 kvOutput
+	// 打开 outputChan 写通道
+	kvOutput := make([]KeyValue, 0)
+	writeChan := make(chan KeyValue, len(kvCache))
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func(outputFile *os.File) {
-		defer wg.Done()
-		for writeMsg := range writeChan {
-			if _, err := outputFile.WriteString(writeMsg + "\n"); err != nil {
-				log.Printf("error writing to %s", outputFile.Name())
-			}
+	writeWg := sync.WaitGroup{}
+	writeWg.Add(1)
+	go func() {
+		defer writeWg.Done()
+		for msg := range writeChan {
+			kvOutput = append(kvOutput, msg)
 		}
-	}(outputFile)
+	}()
 
-	for key, val := range kvCache {
-		outputString := key + " " + reducef(key, val)
-		writeChan <- outputString
+	// reducef 后写入
+	reduceWg := sync.WaitGroup{}
+	for key, vals := range kvCache {
+		reduceWg.Add(1)
+		go func(key string, vals []string) {
+			defer reduceWg.Done()
+			kvElem := KeyValue{
+				Key:   key,
+				Value: reducef(key, vals),
+			}
+			writeChan <- kvElem
+		}(key, vals)
 	}
-	close(writeChan) // channel 写入结束，直接关闭
+	reduceWg.Wait()  // 等待 channel 写入完成
+	close(writeChan) // 关闭 channel
+	writeWg.Wait()   // 等待 kvOutput 写入完成
 
-	// 等待延迟到 handlerRoutine 处理完所有写入请求再关闭文件指针
-	wg.Wait()
+	// kvOutput 排序
+	sort.Slice(kvOutput, func(i, j int) bool {
+		return kvOutput[i].Key < kvOutput[j].Key
+	})
+
+	// writeToFile
+	reduceWrite(kvOutput, outputFile)
 
 	return nil
 }
@@ -252,7 +279,7 @@ func CallAllocTask() (*MRTask, error) {
 	if ok {
 		return &reply.Task, nil
 	} else {
-		return nil, errors.New("CallAllocTask error")
+		return nil, fmt.Errorf("CallAllocTask error")
 	}
 }
 
@@ -267,7 +294,7 @@ func CallSubmitTask(kind string, id int) error {
 	if ok {
 		return nil
 	} else {
-		return errors.New("CallSubmitTask error")
+		return fmt.Errorf("CallSubmitTask error")
 	}
 
 }

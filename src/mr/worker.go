@@ -188,7 +188,7 @@ func doReduce(task *MRTask, reducef func(string, []string) string) error {
 		return kvOutput[i].Key < kvOutput[j].Key
 	})
 
-	// writeToFile
+	// 写入 mr-out-* 文件
 	reduceWrite(kvOutput, outputFile)
 
 	return nil
@@ -196,6 +196,9 @@ func doReduce(task *MRTask, reducef func(string, []string) string) error {
 
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
+	// 是否 log
+	var logOpen bool = false
+
 	// 第一次 RPC call 初始化 nReduce
 	var nReduce int = 0
 
@@ -212,14 +215,20 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 		switch newTask.Kind {
 		case "wait":
-			log.Printf("Wait")
+			if logOpen {
+				log.Printf("Wait")
+			}
 			continue
 		case "end":
-			log.Printf("Worker end")
+			if logOpen {
+				log.Printf("Worker end")
+			}
 			return
 		case "map":
 			// log
-			PrintTask(newTask)
+			if logOpen {
+				PrintTask(newTask)
+			}
 
 			// handle
 			err := doMap(newTask, mapf, nReduce)
@@ -234,10 +243,14 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 				log.Print(err.Error())
 				return
 			}
-			log.Printf("Submitted map task %d", newTask.ID)
+			if logOpen {
+				log.Printf("Submitted map task %d", newTask.ID)
+			}
 		case "reduce":
 			// log
-			PrintTask(newTask)
+			if logOpen {
+				PrintTask(newTask)
+			}
 
 			// handle
 			err := doReduce(newTask, reducef)
@@ -253,7 +266,9 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 				log.Print(err.Error())
 				return
 			}
-			log.Printf("Submitted reduce task %d", newTask.ID)
+			if logOpen {
+				log.Printf("Submitted reduce task %d", newTask.ID)
+			}
 		}
 	}
 }

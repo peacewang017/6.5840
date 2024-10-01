@@ -34,7 +34,7 @@ type MRTask struct {
 }
 
 type coordinatorMessage struct {
-	Kind string // "alloc" | "submit"
+	Kind string // "alloc" | "submit" | "heartbeat"
 
 	// alloc:
 	ReplyChan chan *MRTask
@@ -68,7 +68,7 @@ func (c *Coordinator) PrintTasks() {
 
 func (c *Coordinator) doAllocTask() *MRTask {
 
-	c.PrintTasks()
+	// c.PrintTasks()
 
 	if c.reduceTaskleft == 0 {
 		return &MRTask{
@@ -80,6 +80,7 @@ func (c *Coordinator) doAllocTask() *MRTask {
 		for i := range c.mapTasks {
 			if c.mapTasks[i].Status == Ready {
 				c.mapTasks[i].Status = Running
+				c.mapTasks[i].StartTime = time.Now()
 				return &c.mapTasks[i]
 			}
 		}
@@ -91,6 +92,7 @@ func (c *Coordinator) doAllocTask() *MRTask {
 		for i := range c.reduceTasks {
 			if c.reduceTasks[i].Status == Ready {
 				c.reduceTasks[i].Status = Running
+				c.reduceTasks[i].StartTime = time.Now()
 				return &c.reduceTasks[i]
 			} else if c.reduceTasks[i].Status == Running {
 				// 只要有 Running 的 task 存在，
@@ -133,6 +135,31 @@ func (c *Coordinator) doSubmitTask(TaskKind string, ID int) {
 	}
 }
 
+func (c *Coordinator) doHeartbeat() {
+	if c.reduceTaskleft == 0 {
+		return
+	}
+	if c.mapTaskLeft != 0 {
+		for i := range c.mapTasks {
+			if (c.mapTasks[i].Status == Running) && (time.Since(c.mapTasks[i].StartTime) > 15*time.Second) {
+				c.mapTasks[i].Status = Ready
+			}
+		}
+		return
+	}
+	if c.reduceTaskleft != 0 {
+		for i := range c.reduceTasks {
+			if (c.reduceTasks[i].Status == Running) && (time.Since(c.reduceTasks[i].StartTime) > 15*time.Second) {
+				c.reduceTasks[i].Status = Ready
+			}
+		}
+		return
+	}
+}
+
+/**
+ * 修改 []tasks 数据结构的入口
+ */
 func (c *Coordinator) coordinatorHandler() {
 	for msg := range c.messageChan {
 		switch msg.Kind {
@@ -141,7 +168,24 @@ func (c *Coordinator) coordinatorHandler() {
 
 		case "submit":
 			c.doSubmitTask(msg.TaskKind, msg.ID)
+
+		case "heartbeat":
+			c.doHeartbeat()
 		}
+	}
+}
+
+/**
+ * 定时检查 running task 是否超时
+ * 如果 running task 超时，发送消息将 status 重新设置为 Ready
+ */
+func (c *Coordinator) taskCrashChecker() {
+	for {
+		time.Sleep(time.Duration(15 * time.Second))
+		var msg = coordinatorMessage{
+			Kind: "heartbeat",
+		}
+		c.messageChan <- msg
 	}
 }
 
@@ -240,6 +284,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// 启动 coordinatorHandler 协程
 	c.messageChan = make(chan coordinatorMessage)
 	go c.coordinatorHandler()
+
+	// 启动 crashChecker
+	go c.taskCrashChecker()
 
 	c.server()
 	return &c

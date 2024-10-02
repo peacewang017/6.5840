@@ -8,8 +8,7 @@ import (
 	"net/rpc"
 	"os"
 	"regexp"
-	"sort"
-	"sync"
+	"time"
 )
 
 // Map functions return a slice of KeyValue.
@@ -152,41 +151,53 @@ func doReduce(task *MRTask, reducef func(string, []string) string) error {
 	}
 	defer outputFile.Close()
 
-	// reducef 的结果写入首先无序地写入 kvOutput
-	// 打开 outputChan 写通道
-	kvOutput := make([]KeyValue, 0)
-	writeChan := make(chan KeyValue, len(kvCache))
+	// // reducef 的结果写入首先无序地写入 kvOutput
+	// // 打开 outputChan 写通道
+	// kvOutput := make([]KeyValue, 0, len(kvCache))
+	// writeChan := make(chan KeyValue, len(kvCache))
 
-	writeWg := sync.WaitGroup{}
-	writeWg.Add(1)
-	go func() {
-		defer writeWg.Done()
-		for msg := range writeChan {
-			kvOutput = append(kvOutput, msg)
-		}
-	}()
+	// writeWg := sync.WaitGroup{}
+	// writeWg.Add(1)
+	// go func() {
+	// 	defer writeWg.Done()
+	// 	for msg := range writeChan {
+	// 		kvOutput = append(kvOutput, msg)
+	// 	}
+	// }()
 
-	// reducef 后写入
-	reduceWg := sync.WaitGroup{}
+	// // reducef 后写入
+	// reduceWg := sync.WaitGroup{}
+	// for key, vals := range kvCache {
+	// 	reduceWg.Add(1)
+	// 	go func(key string, vals []string) {
+	// 		defer reduceWg.Done()
+	// 		kvElem := KeyValue{
+	// 			Key:   key,
+	// 			Value: reducef(key, vals),
+	// 		}
+	// 		writeChan <- kvElem
+	// 	}(key, vals)
+	// }
+	// reduceWg.Wait()  // 等待 channel 写入完成
+	// close(writeChan) // 关闭 channel
+	// writeWg.Wait()   // 等待 kvOutput 写入完成
+
+	// // kvOutput 排序
+	// sort.Slice(kvOutput, func(i, j int) bool {
+	// 	return kvOutput[i].Key < kvOutput[j].Key
+	// })
+
+	// 这里感觉有点问题，reducef 的调用应该是并发的，可以有多个 reducef 同时运算
+	// 但这样写会导致并发不安全的 rtiming.go 出现问题
+	// 所以在这里写成串行处理
+	kvOutput := make([]KeyValue, 0, len(kvCache))
 	for key, vals := range kvCache {
-		reduceWg.Add(1)
-		go func(key string, vals []string) {
-			defer reduceWg.Done()
-			kvElem := KeyValue{
-				Key:   key,
-				Value: reducef(key, vals),
-			}
-			writeChan <- kvElem
-		}(key, vals)
+		kvElem := KeyValue{
+			Key:   key,
+			Value: reducef(key, vals),
+		}
+		kvOutput = append(kvOutput, kvElem)
 	}
-	reduceWg.Wait()  // 等待 channel 写入完成
-	close(writeChan) // 关闭 channel
-	writeWg.Wait()   // 等待 kvOutput 写入完成
-
-	// kvOutput 排序
-	sort.Slice(kvOutput, func(i, j int) bool {
-		return kvOutput[i].Key < kvOutput[j].Key
-	})
 
 	// 写入 mr-out-* 文件
 	reduceWrite(kvOutput, outputFile)
@@ -209,17 +220,19 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 		newTask, err := CallAllocTask()
 		if err != nil {
-			// RPC error 被视为 coordinator 结束关闭
 			return
 		}
 
 		switch newTask.Kind {
 		case "wait":
+			// log
 			if logOpen {
 				log.Printf("Wait")
 			}
+			time.Sleep(5 * time.Second)
 			continue
 		case "end":
+			// log
 			if logOpen {
 				log.Printf("Worker end")
 			}
@@ -281,7 +294,7 @@ func CallGetNReduce() int {
 }
 
 /**
- * error 表示 coordinator 已关闭
+ * error 表示 RPC 过程异常
  * MRTask.kind == "wait"，表示等待
  * MRTask.kind == "end"，表示 worker 退出
  */
@@ -312,33 +325,6 @@ func CallSubmitTask(kind string, id int) error {
 		return fmt.Errorf("CallSubmitTask error")
 	}
 
-}
-
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func CallExample() {
-
-	// declare an argument structure.
-	args := ExampleArgs{}
-
-	// fill in the argument(s).
-	args.X = 99
-
-	// declare a reply structure.
-	reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
-	// the "Coordinator.Example" tells the
-	// receiving server that we'd like to call
-	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.Example", &args, &reply)
-	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("reply.Y %v\n", reply.Y)
-	} else {
-		fmt.Printf("call failed!\n")
-	}
 }
 
 // send an RPC request to the coordinator, wait for the response.

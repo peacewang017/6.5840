@@ -67,9 +67,6 @@ func (c *Coordinator) PrintTasks() {
 }
 
 func (c *Coordinator) doAllocTask() *MRTask {
-
-	// c.PrintTasks()
-
 	if c.reduceTaskleft == 0 {
 		return &MRTask{
 			Kind: "end",
@@ -141,7 +138,7 @@ func (c *Coordinator) doHeartbeat() {
 	}
 	if c.mapTaskLeft != 0 {
 		for i := range c.mapTasks {
-			if (c.mapTasks[i].Status == Running) && (time.Since(c.mapTasks[i].StartTime) > 15*time.Second) {
+			if (c.mapTasks[i].Status == Running) && (time.Since(c.mapTasks[i].StartTime) > 10*time.Second) {
 				c.mapTasks[i].Status = Ready
 			}
 		}
@@ -149,7 +146,7 @@ func (c *Coordinator) doHeartbeat() {
 	}
 	if c.reduceTaskleft != 0 {
 		for i := range c.reduceTasks {
-			if (c.reduceTasks[i].Status == Running) && (time.Since(c.reduceTasks[i].StartTime) > 15*time.Second) {
+			if (c.reduceTasks[i].Status == Running) && (time.Since(c.reduceTasks[i].StartTime) > 10*time.Second) {
 				c.reduceTasks[i].Status = Ready
 			}
 		}
@@ -158,7 +155,8 @@ func (c *Coordinator) doHeartbeat() {
 }
 
 /**
- * 修改 []tasks 数据结构的入口
+ * 所有对 []task 数据结构的修改必须通过 channel -> handler
+ * 保证并发安全性
  */
 func (c *Coordinator) coordinatorHandler() {
 	for msg := range c.messageChan {
@@ -181,7 +179,7 @@ func (c *Coordinator) coordinatorHandler() {
  */
 func (c *Coordinator) taskCrashChecker() {
 	for {
-		time.Sleep(time.Duration(15 * time.Second))
+		time.Sleep(time.Duration(10 * time.Second))
 		var msg = coordinatorMessage{
 			Kind: "heartbeat",
 		}
@@ -189,7 +187,9 @@ func (c *Coordinator) taskCrashChecker() {
 	}
 }
 
-// Your code here -- RPC handlers for the worker to call.
+/*
+ * RPC 函数
+ */
 func (c *Coordinator) GetNReduce(args *GetNReduceArgs, reply *GetNReduceReply) error {
 	reply.NReduce = c.nReduce
 	return nil
@@ -215,14 +215,6 @@ func (c *Coordinator) SubmitMRTask(args *SubmitTaskArgs, reply *SubmitTaskReply)
 		ID:       args.TaskID,
 	}
 	c.messageChan <- submitMsg
-	return nil
-}
-
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
 	return nil
 }
 
@@ -282,7 +274,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	// 初始化 messageChannel
 	// 启动 coordinatorHandler 协程
-	c.messageChan = make(chan coordinatorMessage)
+	c.messageChan = make(chan coordinatorMessage, 200)
 	go c.coordinatorHandler()
 
 	// 启动 crashChecker
